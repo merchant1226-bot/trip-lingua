@@ -125,8 +125,10 @@ function useSpeechRecognition() {
     setError(null);
     const rec = new SR();
     rec.lang = langCode;
+    rec.continuous = true;
     rec.interimResults = false;
     rec.maxAlternatives = 1;
+    const collected = { text: "" };
     rec.onstart = () => setListening(true);
     rec.onerror = (e) => {
       setListening(false);
@@ -141,16 +143,27 @@ function useSpeechRecognition() {
         setError("音声を認識できませんでした（" + (reason || "unknown") + "）。もう一度お試しください。");
       }
     };
-    rec.onend = () => setListening(false);
+    rec.onend = () => {
+      setListening(false);
+      const text = collected.text.trim();
+      if (text) onResult(text);
+    };
     rec.onresult = (e) => {
-      const transcript = e.results[0][0].transcript;
-      onResult(transcript);
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          collected.text += e.results[i][0].transcript;
+        }
+      }
     };
     recRef.current = rec;
     rec.start();
   }, []);
 
-  return { listening, error, start };
+  const stop = useCallback(() => {
+    if (recRef.current) recRef.current.stop();
+  }, []);
+
+  return { listening, error, start, stop };
 }
 
 function speak(text, ttsLangCode) {
@@ -245,7 +258,7 @@ function ConversationScreen({ mode, hasKey }) {
   const [inputText, setInputText] = useState("");
   const [busy, setBusy] = useState(false);
   const [apiErr, setApiErr] = useState(null);
-  const { listening, error, start } = useSpeechRecognition();
+  const { listening, error, start, stop } = useSpeechRecognition();
   const scrollRef = useRef(null);
 
   const targetLabel = mode === "en" ? "英語" : targetLang.label;
@@ -270,6 +283,7 @@ function ConversationScreen({ mode, hasKey }) {
   };
 
   const handleMicTap = () => {
+    if (listening) { stop(); return; }
     if (!hasKey) { setApiErr("APIキーが未設定です"); return; }
     setApiErr(null);
     start(targetCode, handleTheirSpeech);
@@ -357,7 +371,7 @@ function ConversationScreen({ mode, hasKey }) {
           </button>
         </div>
         <p style={{ color: c.muted, fontSize: 11, marginTop: 8, textAlign: "center" }}>
-          マイクは常に「相手の発話」用・入力欄は常に「自分の発言（日本語）」用です
+          マイクは常に「相手の発話」用・入力欄は常に「自分の発言（日本語）」用です{listening ? "（もう一度タップで終了）" : ""}
         </p>
       </div>
     </div>
