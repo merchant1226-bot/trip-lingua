@@ -40,6 +40,8 @@ const c = {
   red: "#E08585",
 };
 
+const APP_VERSION = "v0.4";
+
 const LANGS = [
   { code: "en-US", ttsCode: "en-US", label: "英語", flag: "🇺🇸" },
   { code: "zh-CN", ttsCode: "zh-CN", label: "中国語", flag: "🇨🇳" },
@@ -133,7 +135,7 @@ function useSpeechRecognition() {
     rec.onerror = (e) => {
       setListening(false);
       const reason = e && e.error;
-      if (reason === "no-speech") {
+      if (reason === "no-speech" || reason === "aborted") {
         setError(null);
       } else if (reason === "not-allowed" || reason === "service-not-allowed") {
         setError("マイクの使用が許可されていません。ブラウザの設定を確認してください。");
@@ -465,6 +467,7 @@ function TripLingua() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: c.primary }} />
             <span style={{ color: c.text, fontFamily: "monospace", fontSize: 18, letterSpacing: 2 }}>TRIP LINGUA</span>
+            <span style={{ color: c.muted, fontFamily: "monospace", fontSize: 11 }}>{APP_VERSION}</span>
           </div>
           <button onClick={() => setShowSettings((s) => !s)} style={{ background: "none", border: "none", fontSize: 18 }}>⚙️</button>
         </div>
