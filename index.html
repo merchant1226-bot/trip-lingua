@@ -92,14 +92,9 @@ async function translateText(text, sourceLabel, targetLabel) {
 自然で簡潔な会話表現にしてください。前置きやコメントは一切つけず、次のJSON形式のみを返してください：
 {"translation": "翻訳結果"}
 テキスト: ${text}`;
-  try {
-    const raw = await callClaude(prompt);
-    const parsed = JSON.parse(raw);
-    return parsed.translation || "";
-  } catch (e) {
-    if (String(e.message).includes("NO_API_KEY")) throw e;
-    return "(翻訳に失敗しました。もう一度お試しください)";
-  }
+  const raw = await callClaude(prompt);
+  const parsed = JSON.parse(raw);
+  return parsed.translation || "";
 }
 
 async function analyzeImage(base64) {
@@ -112,13 +107,8 @@ async function analyzeImage(base64) {
 {"language": "検出した言語（日本語で表記）", "original": "読み取った原文", "translation": "日本語訳"}`,
     },
   ];
-  try {
-    const raw = await callClaude(content);
-    return JSON.parse(raw);
-  } catch (e) {
-    if (String(e.message).includes("NO_API_KEY")) throw e;
-    return { language: "不明", original: "(読み取りに失敗しました)", translation: "" };
-  }
+  const raw = await callClaude(content);
+  return JSON.parse(raw);
 }
 
 function useSpeechRecognition() {
@@ -133,13 +123,6 @@ function useSpeechRecognition() {
       return;
     }
     setError(null);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((t) => t.stop());
-    } catch (permErr) {
-      setError("マイクへのアクセスが許可されていません。ブラウザの設定でマイクを許可してください。");
-      return;
-    }
     const rec = new SR();
     rec.lang = langCode;
     rec.interimResults = false;
@@ -261,7 +244,7 @@ function ConversationScreen({ mode, hasKey }) {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState("");
   const [busy, setBusy] = useState(false);
-  const [apiErr, setApiErr] = useState(false);
+  const [apiErr, setApiErr] = useState(null);
   const { listening, error, start } = useSpeechRecognition();
   const scrollRef = useRef(null);
 
@@ -276,31 +259,34 @@ function ConversationScreen({ mode, hasKey }) {
 
   const handleTheirSpeech = async (transcript) => {
     setBusy(true);
+    setApiErr(null);
     try {
       const translated = await translateText(transcript, targetLabel, "日本語");
       addMessage({ from: "them", original: transcript, translated, speakText: transcript, speakLang: targetTts });
     } catch (e) {
-      setApiErr(true);
+      setApiErr(String(e && e.message ? e.message : e));
     }
     setBusy(false);
   };
 
   const handleMicTap = () => {
-    if (!hasKey) { setApiErr(true); return; }
+    if (!hasKey) { setApiErr("APIキーが未設定です"); return; }
+    setApiErr(null);
     start(targetCode, handleTheirSpeech);
   };
 
   const handleSend = async () => {
     if (!inputText.trim()) return;
-    if (!hasKey) { setApiErr(true); return; }
+    if (!hasKey) { setApiErr("APIキーが未設定です"); return; }
     setBusy(true);
+    setApiErr(null);
     const text = inputText.trim();
     setInputText("");
     try {
       const translated = await translateText(text, "日本語", targetLabel);
       addMessage({ from: "me", original: text, translated, speakText: translated, speakLang: targetTts });
     } catch (e) {
-      setApiErr(true);
+      setApiErr(String(e && e.message ? e.message : e));
     }
     setBusy(false);
   };
@@ -339,7 +325,7 @@ function ConversationScreen({ mode, hasKey }) {
         )}
         {messages.map((m) => <MessageBubble key={m.id} msg={m} />)}
         {error && <div style={{ textAlign: "center", padding: "8px 0", color: c.red, fontSize: 12 }}>{error}</div>}
-        {apiErr && <div style={{ textAlign: "center", padding: "8px 0", color: c.red, fontSize: 12 }}>APIキーが未設定か、通信に失敗しました。上部の設定を確認してください。</div>}
+        {apiErr && <div style={{ textAlign: "center", padding: "8px 0", color: c.red, fontSize: 12 }}>エラー: {apiErr}</div>}
       </div>
 
       <div style={{ padding: 12, borderTop: "1px solid " + c.border, backgroundColor: c.panel }}>
@@ -382,25 +368,25 @@ function CameraScreen({ hasKey }) {
   const [image, setImage] = useState(null);
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [apiErr, setApiErr] = useState(false);
+  const [apiErr, setApiErr] = useState(null);
   const fileRef = useRef(null);
 
   const handleFile = (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    if (!hasKey) { setApiErr(true); return; }
+    if (!hasKey) { setApiErr("APIキーが未設定です"); return; }
     const reader = new FileReader();
     reader.onload = async () => {
       const base64 = reader.result.split(",")[1];
       setImage(reader.result);
       setResult(null);
-      setApiErr(false);
+      setApiErr(null);
       setBusy(true);
       try {
         const r = await analyzeImage(base64);
         setResult(r);
       } catch (err) {
-        setApiErr(true);
+        setApiErr(String(err && err.message ? err.message : err));
       }
       setBusy(false);
     };
@@ -431,7 +417,7 @@ function CameraScreen({ hasKey }) {
         </React.Fragment>
       )}
       {busy && <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "24px 0", color: c.muted }}>読み取り・翻訳中...</div>}
-      {apiErr && <div style={{ textAlign: "center", color: c.red, fontSize: 12 }}>APIキーが未設定か、通信に失敗しました。上部の設定を確認してください。</div>}
+      {apiErr && <div style={{ textAlign: "center", color: c.red, fontSize: 12 }}>エラー: {apiErr}</div>}
       {result && !busy && (
         <div style={{ borderRadius: 16, padding: 16, backgroundColor: c.panel, border: "1px solid " + c.border, boxShadow: "0 2px 8px rgba(91,141,239,0.08)" }}>
           <span style={{ display: "inline-block", padding: "2px 10px", borderRadius: 999, backgroundColor: c.primary, color: "#fff", fontSize: 11, fontWeight: 600, marginBottom: 12 }}>
