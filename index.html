@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Trip Lingua</title>
+<link rel="manifest" href="./manifest.json" />
+<meta name="theme-color" content="#5B8DEF" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #EAF3FC; font-family: 'Hiragino Sans', 'Noto Sans JP', system-ui, sans-serif; }
+  #root { height: 100%; }
+  * { box-sizing: border-box; }
+  button { font-family: inherit; cursor: pointer; }
+  input { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useCallback, useEffect } = React;
+
+// ---- design tokens: 青基調・優しいトーン ----
+const c = {
+  bg: "#EAF3FC",
+  panel: "#FFFFFF",
+  panel2: "#F3F9FE",
+  border: "#D7E6F7",
+  primary: "#5B8DEF",
+  primarySoft: "#DCE9FB",
+  accent: "#4FB89C",
+  text: "#26374D",
+  muted: "#8098B4",
+  red: "#E08585",
+};
+
+const LANGS = [
+  { code: "en-US", ttsCode: "en-US", label: "英語", flag: "🇺🇸" },
+  { code: "zh-CN", ttsCode: "zh-CN", label: "中国語", flag: "🇨🇳" },
+  { code: "ko-KR", ttsCode: "ko-KR", label: "韓国語", flag: "🇰🇷" },
+  { code: "th-TH", ttsCode: "th-TH", label: "タイ語", flag: "🇹🇭" },
+  { code: "vi-VN", ttsCode: "vi-VN", label: "ベトナム語", flag: "🇻🇳" },
+  { code: "fr-FR", ttsCode: "fr-FR", label: "フランス語", flag: "🇫🇷" },
+  { code: "es-ES", ttsCode: "es-ES", label: "スペイン語", flag: "🇪🇸" },
+  { code: "it-IT", ttsCode: "it-IT", label: "イタリア語", flag: "🇮🇹" },
+  { code: "de-DE", ttsCode: "de-DE", label: "ドイツ語", flag: "🇩🇪" },
+  { code: "pt-PT", ttsCode: "pt-PT", label: "ポルトガル語", flag: "🇵🇹" },
+  { code: "id-ID", ttsCode: "id-ID", label: "インドネシア語", flag: "🇮🇩" },
+];
+
+function getApiKey() {
+  return localStorage.getItem("triplingua_api_key") || "";
+}
+
+async function callClaude(content) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error("NO_API_KEY");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1000,
+      messages: [{ role: "user", content }],
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error("API_ERROR: " + res.status + " " + errText);
+  }
+  const data = await res.json();
+  const text = (data.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+  return text.replace(/```json|```/g, "").trim();
+}
+
+async function translateText(text, sourceLabel, targetLabel) {
+  const prompt = `あなたは旅行者向けの通訳です。以下のテキストを${sourceLabel}から${targetLabel}へ翻訳してください。
+自然で簡潔な会話表現にしてください。前置きやコメントは一切つけず、次のJSON形式のみを返してください：
+{"translation": "翻訳結果"}
+テキスト: ${text}`;
+  try {
+    const raw = await callClaude(prompt);
+    const parsed = JSON.parse(raw);
+    return parsed.translation || "";
+  } catch (e) {
+    if (String(e.message).includes("NO_API_KEY")) throw e;
+    return "(翻訳に失敗しました。もう一度お試しください)";
+  }
+}
+
+async function analyzeImage(base64) {
+  const content = [
+    { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+    {
+      type: "text",
+      text: `この画像に写っている文字をすべて読み取ってください。何語で書かれていても構いません。
+前置きやコメントは一切つけず、次のJSON形式のみを返してください：
+{"language": "検出した言語（日本語で表記）", "original": "読み取った原文", "translation": "日本語訳"}`,
+    },
+  ];
+  try {
+    const raw = await callClaude(content);
+    return JSON.parse(raw);
+  } catch (e) {
+    if (String(e.message).includes("NO_API_KEY")) throw e;
+    return { language: "不明", original: "(読み取りに失敗しました)", translation: "" };
+  }
+}
+
+function useSpeechRecognition() {
+  const [listening, setListening] = useState(false);
+  const [error, setError] = useState(null);
+  const recRef = useRef(null);
+
+  const start = useCallback(async (langCode, onResult) => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setError("この端末・ブラウザは音声認識に対応していません。テキスト入力をご利用ください。");
+      return;
+    }
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (permErr) {
+      setError("マイクへのアクセスが許可されていません。ブラウザの設定でマイクを許可してください。");
+      return;
+    }
+    const rec = new SR();
+    rec.lang = langCode;
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    rec.onstart = () => setListening(true);
+    rec.onerror = (e) => {
+      setListening(false);
+      const reason = e && e.error;
+      if (reason === "no-speech") {
+        setError(null);
+      } else if (reason === "not-allowed" || reason === "service-not-allowed") {
+        setError("マイクの使用が許可されていません。ブラウザの設定を確認してください。");
+      } else if (reason === "network") {
+        setError("音声認識サーバーに接続できませんでした。通信状況をご確認ください。");
+      } else {
+        setError("音声を認識できませんでした（" + (reason || "unknown") + "）。もう一度お試しください。");
+      }
+    };
+    rec.onend = () => setListening(false);
+    rec.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      onResult(transcript);
+    };
+    recRef.current = rec;
+    rec.start();
+  }, []);
+
+  return { listening, error, start };
+}
+
+function speak(text, ttsLangCode) {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = ttsLangCode;
+  window.speechSynthesis.speak(u);
+}
+
+function Pill({ active, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        padding: "8px 16px",
+        borderRadius: 999,
+        fontSize: 14,
+        fontWeight: 500,
+        backgroundColor: active ? c.primary : c.panel,
+        color: active ? "#FFFFFF" : c.muted,
+        border: "1px solid " + (active ? c.primary : c.border),
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function MessageBubble({ msg }) {
+  const isMe = msg.from === "me";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", marginBottom: 12, alignItems: isMe ? "flex-end" : "flex-start" }}>
+      <div
+        style={{
+          maxWidth: "85%",
+          borderRadius: 16,
+          padding: "12px 16px",
+          backgroundColor: isMe ? c.primarySoft : c.panel,
+          border: "1px solid " + c.border,
+          boxShadow: "0 2px 8px rgba(91,141,239,0.08)",
+          borderTopRightRadius: isMe ? 4 : 16,
+          borderTopLeftRadius: !isMe ? 4 : 16,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+          <span style={{ color: c.muted, fontSize: 11, letterSpacing: 1 }}>{isMe ? "自分" : "相手"}</span>
+        </div>
+        <div style={{ color: c.text, fontSize: 15, lineHeight: 1.5 }}>{msg.original}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, paddingTop: 8, borderTop: "1px solid " + c.border }}>
+          <span style={{ color: c.accent, fontSize: 15, lineHeight: 1.5, flex: 1, fontWeight: 500 }}>{msg.translated}</span>
+          {msg.speakLang && (
+            <button onClick={() => speak(msg.speakText, msg.speakLang)} style={{ background: "none", border: "none", flexShrink: 0 }}>
+              🔊
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApiKeyBanner({ onSave }) {
+  const [key, setKey] = useState("");
+  return (
+    <div style={{ padding: 16, backgroundColor: c.panel2, borderBottom: "1px solid " + c.border }}>
+      <p style={{ color: c.text, fontSize: 13, marginBottom: 8 }}>
+        翻訳にはAnthropic APIキーが必要です。console.anthropic.com で発行したキーを入力してください（この端末にのみ保存されます）。
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          type="password"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="sk-ant-..."
+          style={{ flex: 1, padding: "10px 14px", borderRadius: 999, border: "1px solid " + c.border, backgroundColor: c.panel, fontSize: 13 }}
+        />
+        <button
+          onClick={() => key.trim() && onSave(key.trim())}
+          style={{ padding: "10px 18px", borderRadius: 999, border: "none", backgroundColor: c.primary, color: "#fff", fontSize: 13, fontWeight: 600 }}
+        >
+          保存
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ConversationScreen({ mode, hasKey }) {
+  const [targetLang, setTargetLang] = useState(LANGS[0]);
+  const [messages, setMessages] = useState([]);
+  const [inputText, setInputText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [apiErr, setApiErr] = useState(false);
+  const { listening, error, start } = useSpeechRecognition();
+  const scrollRef = useRef(null);
+
+  const targetLabel = mode === "en" ? "英語" : targetLang.label;
+  const targetCode = mode === "en" ? LANGS[0].code : targetLang.code;
+  const targetTts = mode === "en" ? LANGS[0].ttsCode : targetLang.ttsCode;
+
+  const addMessage = (m) => {
+    setMessages((prev) => [...prev, Object.assign({ id: Date.now() + Math.random() }, m)]);
+    setTimeout(() => scrollRef.current && scrollRef.current.scrollTo({ top: 999999, behavior: "smooth" }), 50);
+  };
+
+  const handleTheirSpeech = async (transcript) => {
+    setBusy(true);
+    try {
+      const translated = await translateText(transcript, targetLabel, "日本語");
+      addMessage({ from: "them", original: transcript, translated, speakText: transcript, speakLang: targetTts });
+    } catch (e) {
+      setApiErr(true);
+    }
+    setBusy(false);
+  };
+
+  const handleMicTap = () => {
+    if (!hasKey) { setApiErr(true); return; }
+    start(targetCode, handleTheirSpeech);
+  };
+
+  const handleSend = async () => {
+    if (!inputText.trim()) return;
+    if (!hasKey) { setApiErr(true); return; }
+    setBusy(true);
+    const text = inputText.trim();
+    setInputText("");
+    try {
+      const translated = await translateText(text, "日本語", targetLabel);
+      addMessage({ from: "me", original: text, translated, speakText: translated, speakLang: targetTts });
+    } catch (e) {
+      setApiErr(true);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {mode === "multi" && (
+        <div style={{ padding: "12px 16px 8px", display: "flex", gap: 8, overflowX: "auto", borderBottom: "1px solid " + c.border }}>
+          {LANGS.map((l) => (
+            <button
+              key={l.code}
+              onClick={() => setTargetLang(l)}
+              style={{
+                flexShrink: 0, padding: "6px 12px", borderRadius: 999, fontSize: 12,
+                backgroundColor: targetLang.code === l.code ? c.primary : c.panel,
+                color: targetLang.code === l.code ? "#fff" : c.muted,
+                border: "1px solid " + (targetLang.code === l.code ? c.primary : c.border),
+              }}
+            >
+              {l.flag} {l.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+        {messages.length === 0 && (
+          <div style={{ textAlign: "center", marginTop: 40, color: c.muted }}>
+            <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.5 }}>🌐</div>
+            <p style={{ fontSize: 13 }}>
+              {mode === "en"
+                ? "マイクで相手の英語を認識するか、下から日本語/英語を入力してください"
+                : "マイクで" + targetLang.label + "を認識するか、下から日本語で入力してください"}
+            </p>
+          </div>
+        )}
+        {messages.map((m) => <MessageBubble key={m.id} msg={m} />)}
+        {error && <div style={{ textAlign: "center", padding: "8px 0", color: c.red, fontSize: 12 }}>{error}</div>}
+        {apiErr && <div style={{ textAlign: "center", padding: "8px 0", color: c.red, fontSize: 12 }}>APIキーが未設定か、通信に失敗しました。上部の設定を確認してください。</div>}
+      </div>
+
+      <div style={{ padding: 12, borderTop: "1px solid " + c.border, backgroundColor: c.panel }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={handleMicTap}
+            disabled={busy}
+            style={{
+              width: 46, height: 46, borderRadius: "50%", border: "none", flexShrink: 0,
+              backgroundColor: listening ? c.red : c.primary, color: "#fff", fontSize: 18,
+              boxShadow: "0 2px 8px rgba(91,141,239,0.3)",
+            }}
+          >
+            {busy ? "…" : "🎤"}
+          </button>
+          <input
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSend()}
+            placeholder={mode === "en" ? "日本語で入力（英語訳を表示）" : "日本語で入力"}
+            style={{ flex: 1, borderRadius: 999, padding: "12px 16px", border: "1px solid " + c.border, backgroundColor: c.panel2, color: c.text, fontSize: 14, outline: "none" }}
+          />
+          <button
+            onClick={handleSend}
+            disabled={busy || !inputText.trim()}
+            style={{ width: 46, height: 46, borderRadius: "50%", border: "1px solid " + c.border, backgroundColor: c.panel2, color: c.primary, flexShrink: 0, fontSize: 18 }}
+          >
+            ➤
+          </button>
+        </div>
+        <p style={{ color: c.muted, fontSize: 11, marginTop: 8, textAlign: "center" }}>
+          マイクは常に「相手の発話」用・入力欄は常に「自分の発言（日本語）」用です
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function CameraScreen({ hasKey }) {
+  const [image, setImage] = useState(null);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [apiErr, setApiErr] = useState(false);
+  const fileRef = useRef(null);
+
+  const handleFile = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (!hasKey) { setApiErr(true); return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result.split(",")[1];
+      setImage(reader.result);
+      setResult(null);
+      setApiErr(false);
+      setBusy(true);
+      try {
+        const r = await analyzeImage(base64);
+        setResult(r);
+      } catch (err) {
+        setApiErr(true);
+      }
+      setBusy(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 16, gap: 16, overflowY: "auto" }}>
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+      {!image && (
+        <button
+          onClick={() => fileRef.current && fileRef.current.click()}
+          style={{ flex: 1, borderRadius: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, border: "2px dashed " + c.border, minHeight: 260, color: c.muted, backgroundColor: c.panel }}
+        >
+          <div style={{ fontSize: 36 }}>📷</div>
+          <span style={{ fontSize: 14 }}>看板・メニュー・案内板を撮影</span>
+        </button>
+      )}
+      {image && (
+        <React.Fragment>
+          <img src={image} alt="captured" style={{ borderRadius: 12, width: "100%", maxHeight: 220, objectFit: "cover" }} />
+          <button
+            onClick={() => fileRef.current && fileRef.current.click()}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 999, padding: "8px 0", border: "1px solid " + c.border, color: c.muted, fontSize: 13, backgroundColor: c.panel }}
+          >
+            🔄 撮り直す
+          </button>
+        </React.Fragment>
+      )}
+      {busy && <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "24px 0", color: c.muted }}>読み取り・翻訳中...</div>}
+      {apiErr && <div style={{ textAlign: "center", color: c.red, fontSize: 12 }}>APIキーが未設定か、通信に失敗しました。上部の設定を確認してください。</div>}
+      {result && !busy && (
+        <div style={{ borderRadius: 16, padding: 16, backgroundColor: c.panel, border: "1px solid " + c.border, boxShadow: "0 2px 8px rgba(91,141,239,0.08)" }}>
+          <span style={{ display: "inline-block", padding: "2px 10px", borderRadius: 999, backgroundColor: c.primary, color: "#fff", fontSize: 11, fontWeight: 600, marginBottom: 12 }}>
+            {result.language}
+          </span>
+          <p style={{ color: c.text, fontSize: 14, marginBottom: 12, lineHeight: 1.6 }}>{result.original}</p>
+          <div style={{ borderTop: "1px solid " + c.border, paddingTop: 12 }}>
+            <p style={{ color: c.accent, fontSize: 15, lineHeight: 1.6, fontWeight: 500 }}>{result.translation}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TripLingua() {
+  const [tab, setTab] = useState("en");
+  const [apiKey, setApiKey] = useState(getApiKey());
+  const [showSettings, setShowSettings] = useState(!getApiKey());
+
+  const saveKey = (key) => {
+    localStorage.setItem("triplingua_api_key", key);
+    setApiKey(key);
+    setShowSettings(false);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", maxWidth: 480, margin: "0 auto", height: "100vh", backgroundColor: c.bg }}>
+      <div style={{ padding: "20px 16px 12px", borderBottom: "1px solid " + c.border, backgroundColor: c.panel }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: c.primary }} />
+            <span style={{ color: c.text, fontFamily: "monospace", fontSize: 18, letterSpacing: 2 }}>TRIP LINGUA</span>
+          </div>
+          <button onClick={() => setShowSettings((s) => !s)} style={{ background: "none", border: "none", fontSize: 18 }}>⚙️</button>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Pill active={tab === "en"} onClick={() => setTab("en")}>💬 英会話</Pill>
+          <Pill active={tab === "multi"} onClick={() => setTab("multi")}>🌐 多言語</Pill>
+          <Pill active={tab === "camera"} onClick={() => setTab("camera")}>📷 撮影翻訳</Pill>
+        </div>
+      </div>
+
+      {showSettings && <ApiKeyBanner onSave={saveKey} />}
+
+      <div style={{ flex: 1, minHeight: 0, backgroundColor: c.bg }}>
+        {tab === "en" && <ConversationScreen mode="en" hasKey={!!apiKey} />}
+        {tab === "multi" && <ConversationScreen mode="multi" hasKey={!!apiKey} />}
+        {tab === "camera" && <CameraScreen hasKey={!!apiKey} />}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<TripLingua />);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
