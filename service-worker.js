@@ -1,4 +1,4 @@
-const CACHE_NAME = "trip-lingua-v1";
+const CACHE_NAME = "trip-lingua-v2";
 const APP_SHELL = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -19,12 +19,20 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  // 同一オリジンのアプリ本体だけキャッシュする。
-  // Anthropic APIやCDNへの通信はキャッシュせず、常にネットワークへ通す。
+  // Anthropic APIやCDNへの通信は素通しする
   if (url.origin !== self.location.origin) {
     return;
   }
+  // アプリ本体はネットワーク優先。取得できたら常に最新をキャッシュに保存し直す。
+  // オフライン時のみキャッシュにフォールバックする。
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    fetch(event.request)
+      .then((res) => {
+        const clone = res.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        return res;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
+
